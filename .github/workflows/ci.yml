@@ -34,5 +34,5 @@ jobs:
         run: sudo apt-get update && sudo apt-get install --yes libcurl4-openssl-dev
       - uses: dtolnay/rust-toolchain@1.98.0
       - uses: Swatinem/rust-cache@v2
-      - name: Real Kafka restart/replay gate
+      - name: Real Kafka crash/restart replay gate
         run: cargo test --test kafka_real -- --ignored --nocapture

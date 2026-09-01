@@ -24,7 +24,7 @@ The complete correctness contract is in
 The repository pins Rust 1.98 and forbids unsafe code, implicit unwrap/expect,
 and Clippy warnings. Pull requests run formatting, strict Clippy, unit tests,
 the in-process mock Kafka test, and an ignored-by-default Docker-backed real
-Kafka restart/replay test. Run the real Kafka gate locally with:
+Kafka crash/restart replay test. Run the real Kafka gate locally with:
 
 ```console
 cargo test --test kafka_real -- --ignored --nocapture

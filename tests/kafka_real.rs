@@ -25,7 +25,7 @@ use tokio_util::sync::CancellationToken;
     clippy::too_many_lines,
     reason = "the full restart/replay sequence is kept in one test for auditability"
 )]
-async fn restart_replays_from_first_unacked_gap() -> Result<()> {
+async fn crash_restart_replays_from_first_unacked_gap() -> Result<()> {
     const TOPIC: &str = "vehicle-signals-replay";
     const GROUP: &str = "flux-real-replay";
     const RECORD_COUNT: usize = 100;
@@ -66,10 +66,9 @@ async fn restart_replays_from_first_unacked_gap() -> Result<()> {
     let expected_end = offsets[RECORD_COUNT - 1] + 1;
 
     let (seen_tx, mut seen_rx) = mpsc::unbounded_channel();
-    let first_shutdown = CancellationToken::new();
     let first_run = tokio::spawn(run_with_sink(
         test_config(&bootstrap_servers, GROUP),
-        first_shutdown.clone(),
+        CancellationToken::new(),
         move |mut records, completions| async move {
             while let Some(record) = records.recv().await {
                 let token = record.token.clone();
@@ -94,15 +93,19 @@ async fn restart_replays_from_first_unacked_gap() -> Result<()> {
             .context("timed out waiting for first-run delivery")?
             .context("first-run sink closed early")?;
     }
-    first_shutdown.cancel();
-    timeout(Duration::from_secs(10), first_run)
+    first_run.abort();
+    let abort_error = timeout(Duration::from_secs(10), first_run)
         .await
-        .context("first ingress did not stop")?
-        .context("first ingress task panicked")??;
+        .context("crashed ingress task did not stop")?
+        .err()
+        .context("ingress completed instead of being aborted")?;
+    if !abort_error.is_cancelled() {
+        bail!("crashed ingress task failed unexpectedly: {abort_error}");
+    }
 
     let observer = offset_observer(&bootstrap_servers, GROUP)?;
     let first_committed = committed_offset(&observer, TOPIC)?;
-    if first_committed != Some(blocked_offset) {
+    if first_committed.is_some_and(|offset| offset > blocked_offset) {
         bail!(
             "safe prefix crossed the unacked gap: committed={first_committed:?}, gap={blocked_offset}"
         );
