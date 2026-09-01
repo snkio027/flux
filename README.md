@@ -18,6 +18,15 @@ processor through `run_with_sink`. Downstream code consumes each
 `IngressRecord` into `record.succeed()` or `record.fail(reason)`; assignment
 tokens remain private to the ingress correctness kernel.
 
+The object-processing foundation accepts UTF-8 JSON Kafka payloads with
+required `bucket`, `key`, and unsigned integer `size` fields plus an optional
+opaque `etag`. It validates metadata inline, retains the source record through
+the complete object-work lifetime, and distributes validated work over a
+bounded Flume worker queue. The actual S3 streaming processor is the next
+integration step; `run` continues to use the proof sink until that processor is
+present. See [`docs/object-processing-foundation.md`](docs/object-processing-foundation.md)
+for the frozen boundary and failure semantics.
+
 The complete correctness contract is in
 [`docs/kafka-ingress-v1.md`](docs/kafka-ingress-v1.md).
 

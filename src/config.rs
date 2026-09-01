@@ -11,6 +11,9 @@ const DEFAULT_WORK_QUEUE_CAPACITY: usize = 2_048;
 const DEFAULT_COMPLETION_QUEUE_CAPACITY: usize = 2_048;
 const DEFAULT_MEMORY_BUDGET_BYTES: usize = 64 * 1024 * 1024;
 const DEFAULT_MAX_PAYLOAD_BYTES: usize = 1024 * 1024;
+const DEFAULT_OBJECT_QUEUE_CAPACITY: usize = 256;
+const DEFAULT_OBJECT_WORKER_COUNT: usize = 8;
+const DEFAULT_MAX_OBJECT_SIZE: u64 = 1024 * 1024 * 1024;
 const DEFAULT_PREFETCH_MAX_KBYTES: u32 = 16 * 1024;
 const DEFAULT_PAUSE_HIGH_WATERMARK_PERCENT: u8 = 80;
 const DEFAULT_RESUME_LOW_WATERMARK_PERCENT: u8 = 50;
@@ -21,6 +24,7 @@ pub(crate) const RECORD_ACCOUNTING_OVERHEAD_BYTES: usize = 128;
 pub struct AppConfig {
     pub kafka: KafkaConfig,
     pub ingress: IngressConfig,
+    pub object_processing: ObjectProcessingConfig,
     pub shutdown: ShutdownConfig,
 }
 
@@ -48,6 +52,7 @@ impl AppConfig {
     pub fn validate(&self) -> Result<()> {
         self.kafka.validate()?;
         self.ingress.validate()?;
+        self.object_processing.validate()?;
         self.shutdown.validate()
     }
 }
@@ -156,6 +161,40 @@ impl IngressConfig {
 
 #[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+pub struct ObjectProcessingConfig {
+    pub queue_capacity: usize,
+    pub worker_count: usize,
+    /// Maximum accepted value of the wire-level `size` field, in bytes.
+    pub max_object_size: u64,
+}
+
+impl Default for ObjectProcessingConfig {
+    fn default() -> Self {
+        Self {
+            queue_capacity: DEFAULT_OBJECT_QUEUE_CAPACITY,
+            worker_count: DEFAULT_OBJECT_WORKER_COUNT,
+            max_object_size: DEFAULT_MAX_OBJECT_SIZE,
+        }
+    }
+}
+
+impl ObjectProcessingConfig {
+    fn validate(self) -> Result<()> {
+        if self.queue_capacity == 0 {
+            bail!("object_processing.queue_capacity must be greater than zero");
+        }
+        if self.worker_count == 0 {
+            bail!("object_processing.worker_count must be greater than zero");
+        }
+        if self.max_object_size == 0 {
+            bail!("object_processing.max_object_size must be greater than zero");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct BackpressureConfig {
     pub pause_high_watermark_percent: u8,
     pub resume_low_watermark_percent: u8,
@@ -232,6 +271,8 @@ struct SerializedAppConfig {
     #[serde(default)]
     ingress: Option<IngressConfig>,
     #[serde(default)]
+    object_processing: Option<ObjectProcessingConfig>,
+    #[serde(default)]
     shutdown: Option<ShutdownConfig>,
 }
 
@@ -253,6 +294,7 @@ impl SerializedAppConfig {
         Ok(AppConfig {
             kafka,
             ingress: self.ingress.or(legacy_ingress).unwrap_or_default(),
+            object_processing: self.object_processing.unwrap_or_default(),
             shutdown: self.shutdown.or(legacy_shutdown).unwrap_or_default(),
         })
     }
@@ -407,6 +449,9 @@ mod tests {
         assert_eq!(config.ingress.memory_budget_bytes, 64 * 1024 * 1024);
         assert_eq!(config.ingress.max_payload_bytes, 1024 * 1024);
         assert_eq!(config.ingress.backpressure.pause_high_watermark_percent, 80);
+        assert_eq!(config.object_processing.queue_capacity, 256);
+        assert_eq!(config.object_processing.worker_count, 8);
+        assert_eq!(config.object_processing.max_object_size, 1024 * 1024 * 1024);
         assert_eq!(config.shutdown.grace_ms, 30_000);
     }
 
@@ -492,6 +537,27 @@ mod tests {
 
         config.validate().unwrap();
         assert_eq!(config.ingress.work_queue_capacity, 2_048);
+        assert_eq!(config.object_processing.worker_count, 8);
         assert_eq!(config.shutdown.grace_ms, 30_000);
+    }
+
+    #[test]
+    fn rejects_invalid_object_processing_limits() {
+        let config = toml::from_str::<AppConfig>(
+            r#"
+                [kafka]
+                bootstrap_servers = ["localhost:9092"]
+                group_id = "test"
+                topics = ["signals"]
+                auto_offset_reset = "earliest"
+
+                [object_processing]
+                worker_count = 0
+            "#,
+        )
+        .unwrap();
+        let error = config.validate().unwrap_err();
+
+        assert!(error.to_string().contains("worker_count"));
     }
 }

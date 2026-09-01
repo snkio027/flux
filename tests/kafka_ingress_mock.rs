@@ -3,7 +3,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use flux::{
     config::{
-        AppConfig, AutoOffsetReset, BackpressureConfig, IngressConfig, KafkaConfig, ShutdownConfig,
+        AppConfig, AutoOffsetReset, BackpressureConfig, IngressConfig, KafkaConfig,
+        ObjectProcessingConfig, ShutdownConfig,
     },
     run, run_with_sink,
 };
@@ -255,6 +256,7 @@ fn test_config(bootstrap_servers: &str, group_id: &str, topic: &str) -> AppConfi
                 resume_low_watermark_percent: 50,
             },
         },
+        object_processing: ObjectProcessingConfig::default(),
         shutdown: ShutdownConfig { grace_ms: 2_000 },
     }
 }
