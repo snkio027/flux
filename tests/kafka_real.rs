@@ -4,7 +4,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use flux::{
     config::{
         AppConfig, AutoOffsetReset, BackpressureConfig, IngressConfig, KafkaConfig,
-        ObjectProcessingConfig, ShutdownConfig,
+        ObjectProcessingConfig, S3Config, ShutdownConfig,
     },
     run_with_sink,
 };
@@ -197,6 +197,7 @@ fn test_config(bootstrap_servers: &str, group_id: &str) -> AppConfig {
             },
         },
         object_processing: ObjectProcessingConfig::default(),
+        s3: S3Config::default(),
         shutdown: ShutdownConfig { grace_ms: 5_000 },
     }
 }

@@ -34,6 +34,21 @@ worker_count = 8
 # Maximum accepted metadata `size` value, in bytes (1 GiB).
 max_object_size = 1073741824
 
+[s3]
+# Credentials are resolved by the standard AWS environment/profile/role chain
+# and are never stored in this file.
+region = "us-east-1"
+# endpoint_url = "http://localhost:9000"
+force_path_style = false
+# max_attempts includes the initial request.
+max_attempts = 3
+connect_timeout_ms = 3000
+operation_attempt_timeout_ms = 30000
+operation_timeout_ms = 120000
+# Request timeouts stop once GetObject returns; this separately bounds a
+# stalled response body between chunks.
+stream_idle_timeout_ms = 20000
+
 [shutdown]
 # On expiry, commit only the ACKed safe prefix and exit non-zero.
 grace_ms = 30000

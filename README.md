@@ -22,10 +22,16 @@ The object-processing foundation accepts UTF-8 JSON Kafka payloads with
 required `bucket`, `key`, and unsigned integer `size` fields plus an optional
 opaque `etag`. It validates metadata inline, retains the source record through
 the complete object-work lifetime, and distributes validated work over a
-bounded Flume worker queue. The actual S3 streaming processor is the next
-integration step; `run` continues to use the proof sink until that processor is
-present. See [`docs/object-processing-foundation.md`](docs/object-processing-foundation.md)
+bounded Flume worker queue. See
+[`docs/object-processing-foundation.md`](docs/object-processing-foundation.md)
 for the frozen boundary and failure semantics.
+
+`S3Downloader` is the concrete object transport boundary. It uses the standard
+AWS credential provider chain, performs streaming `GetObject`, enforces request
+and stream-idle timeouts, and verifies `Content-Length`, streamed byte count,
+and optional ETag without aggregating the object in memory. It is intentionally
+not installed as the default sink until gzip and DBC processing can consume the
+stream. See [`docs/s3-streaming-processor.md`](docs/s3-streaming-processor.md).
 
 The complete correctness contract is in
 [`docs/kafka-ingress-v1.md`](docs/kafka-ingress-v1.md).
