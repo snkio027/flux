@@ -26,6 +26,14 @@ max_payload_bytes = 1048576
 pause_high_watermark_percent = 80
 resume_low_watermark_percent = 50
 
+[object_processing]
+# Validated work is distributed through a bounded MPMC queue. Each worker
+# processes at most one object at a time.
+queue_capacity = 256
+worker_count = 8
+# Maximum accepted metadata `size` value, in bytes (1 GiB).
+max_object_size = 1073741824
+
 [shutdown]
 # On expiry, commit only the ACKed safe prefix and exit non-zero.
 grace_ms = 30000

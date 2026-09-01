@@ -6,8 +6,9 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    ObjectMetadata,
     config::AppConfig,
-    downstream::run_discard_sink,
+    downstream::{run_discard_sink, run_object_sink},
     ingress::{
         AssignmentRegistry, Completion, IngressRecord, KafkaContext, KafkaRunner, RebalanceEvent,
         RunnerChannels, RunnerConfig, RunnerInputs, build_consumer,
@@ -22,6 +23,31 @@ use crate::{
 /// or graceful shutdown fails.
 pub async fn run(config: AppConfig, shutdown: CancellationToken) -> Result<()> {
     run_with_sink(config, shutdown, run_discard_sink).await
+}
+
+/// Runs ingress through the bounded object-processing pipeline with an injected processor.
+///
+/// Metadata decoding, worker distribution, and Kafka completion ownership are
+/// handled by this function. The processor receives only validated object metadata.
+///
+/// # Errors
+///
+/// Returns an error when ingress, metadata decoding, object processing, or
+/// completion delivery fails.
+pub async fn run_with_object_processor<Processor, ProcessorFuture>(
+    config: AppConfig,
+    shutdown: CancellationToken,
+    processor: Processor,
+) -> Result<()>
+where
+    Processor: Fn(ObjectMetadata) -> ProcessorFuture + Send + Sync + 'static,
+    ProcessorFuture: Future<Output = Result<()>> + Send + 'static,
+{
+    let object_processing = config.object_processing;
+    run_with_sink(config, shutdown, move |records, completions| {
+        run_object_sink(records, completions, object_processing, processor)
+    })
+    .await
 }
 
 /// Runs ingress with an injected downstream sink while preserving the same ACK contract.
