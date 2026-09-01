@@ -1,0 +1,18 @@
+[kafka]
+bootstrap_servers = ["localhost:9092"]
+group_id = "vehicle-signal-processor"
+topics = ["vehicle-signals"]
+client_id = "vehicle-signal-processor"
+auto_offset_reset = "latest"
+
+# Broker commits remain automatic. The application updates librdkafka's local
+# offset store immediately whenever the safe completion prefix advances.
+auto_commit_interval_ms = 5000
+session_timeout_ms = 45000
+max_poll_interval_ms = 300000
+
+# A record must own capacity from both budgets before it enters the work queue.
+work_queue_capacity = 1024
+completion_queue_capacity = 1024
+memory_budget_bytes = 268435456
+record_accounting_overhead_bytes = 128

@@ -1,0 +1,15 @@
+[package]
+name = "flux"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+rdkafka = { version = "0.39", features = ["cmake-build"] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+toml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
