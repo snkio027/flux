@@ -27,5 +27,5 @@ the in-process mock Kafka test, and an ignored-by-default Docker-backed real
 Kafka crash/restart replay test. Run the real Kafka gate locally with:
 
 ```console
-cargo test --test kafka_real -- --ignored --nocapture
+cargo test --locked --test kafka_real -- --ignored --nocapture
 ```

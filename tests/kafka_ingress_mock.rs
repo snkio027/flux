@@ -168,6 +168,74 @@ async fn downstream_failure_does_not_commit_the_failed_record() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sink_error_preserves_root_cause_and_does_not_commit() -> Result<()> {
+    const TOPIC: &str = "vehicle-signals-sink-error";
+    const GROUP: &str = "flux-mock-sink-error";
+
+    let producer: FutureProducer = ClientConfig::new()
+        .set("test.mock.num.brokers", "1")
+        .create()
+        .context("create producer")?;
+    let cluster = producer
+        .client()
+        .mock_cluster()
+        .context("producer did not expose its mock cluster")?;
+    cluster
+        .create_topic(TOPIC, 1, 1)
+        .context("create mock topic")?;
+    let bootstrap_servers = cluster.bootstrap_servers();
+    drop(cluster);
+
+    producer
+        .send(
+            FutureRecord::to(TOPIC)
+                .key("vehicle-sink-error")
+                .payload("signal"),
+            Timeout::After(Duration::from_secs(2)),
+        )
+        .await
+        .map_err(|(error, _)| error)
+        .context("produce sink-error mock record")?;
+
+    let result = timeout(
+        Duration::from_secs(10),
+        run_with_sink(
+            test_config(&bootstrap_servers, GROUP, TOPIC),
+            CancellationToken::new(),
+            |mut records, completions| async move {
+                let record = records
+                    .recv()
+                    .await
+                    .context("sink closed before receiving the record")?;
+                drop(record);
+                drop(completions);
+                Err(anyhow!("synthetic sink root cause"))
+            },
+        ),
+    )
+    .await
+    .context("ingress did not stop after the sink error")?;
+
+    let report = match result {
+        Ok(()) => bail!("ingress accepted a sink error"),
+        Err(error) => format!("{error:#}"),
+    };
+    if !report.contains("synthetic sink root cause") {
+        bail!("sink root cause was hidden: {report}");
+    }
+
+    let observer: BaseConsumer = ClientConfig::new()
+        .set("bootstrap.servers", &bootstrap_servers)
+        .set("group.id", GROUP)
+        .create()
+        .context("create committed-offset observer")?;
+    if committed_offset(&observer, TOPIC)?.is_some() {
+        bail!("sink error advanced the committed offset");
+    }
+    Ok(())
+}
+
 fn test_config(bootstrap_servers: &str, group_id: &str, topic: &str) -> AppConfig {
     AppConfig {
         kafka: KafkaConfig {

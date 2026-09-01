@@ -5,12 +5,17 @@ on:
     branches: [main]
   pull_request:
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
 jobs:
   rust:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Install librdkafka build dependencies
@@ -22,12 +27,13 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Lint
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - name: Unit and mock Kafka tests
-        run: cargo test
+        run: cargo test --locked --all-targets --all-features
 
   real-kafka:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Install librdkafka build dependencies
@@ -35,4 +41,4 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.0
       - uses: Swatinem/rust-cache@v2
       - name: Real Kafka crash/restart replay gate
-        run: cargo test --test kafka_real -- --ignored --nocapture
+        run: cargo test --locked --test kafka_real -- --ignored --nocapture

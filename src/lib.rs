@@ -91,11 +91,21 @@ where
     let sink_result = match sink.await {
         Ok(result) => result,
         Err(error) if error.is_cancelled() && runner_result.is_err() => Ok(()),
-        Err(error) => Err(anyhow!("discard sink task failed: {error}")),
+        Err(error) => Err(anyhow!("downstream sink task failed: {error}")),
     };
 
-    runner_result?;
-    sink_result
+    combine_run_results(runner_result, sink_result)
+}
+
+fn combine_run_results(runner_result: Result<()>, sink_result: Result<()>) -> Result<()> {
+    match (runner_result, sink_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(runner), Ok(())) => Err(runner),
+        (Ok(()), Err(sink)) => Err(sink),
+        (Err(runner), Err(sink)) => {
+            Err(runner.context(format!("downstream also failed: {sink:#}")))
+        }
+    }
 }
 
 fn build_consumer(config: &AppConfig, context: KafkaContext) -> Result<ManagedConsumer> {
@@ -137,4 +147,24 @@ fn build_consumer(config: &AppConfig, context: KafkaContext) -> Result<ManagedCo
     client
         .create_with_context(context)
         .context("failed to create Kafka consumer")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn combined_failure_keeps_the_downstream_root_cause() {
+        let result = combine_run_results(
+            Err(anyhow!("runner observed a closed completion channel")),
+            Err(anyhow!("downstream parser rejected the record")),
+        );
+        let report = match result {
+            Ok(()) => String::new(),
+            Err(error) => format!("{error:#}"),
+        };
+
+        assert!(report.contains("downstream parser rejected the record"));
+        assert!(report.contains("runner observed a closed completion channel"));
+    }
 }

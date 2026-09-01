@@ -54,6 +54,9 @@ from the tracker's safe snapshot.
   capacity and byte-budget capacity.
 - `KAFKA-015`: The final synchronous offset set is derived from the
   `OffsetTracker` safe snapshot, never the last received position.
+- `KAFKA-016`: Delivered offsets are strictly increasing within one partition
+  assignment epoch. Numeric gaps are allowed; backward or duplicate delivery
+  fails closed.
 
 ## Rebalance split of responsibility
 
@@ -91,7 +94,8 @@ not exist. A future revision can introduce explicit retry, quarantine, and fatal
 dispositions.
 
 Shutdown uses this sequence, bounded by `shutdown_grace_ms` (30 seconds by
-default):
+default). The service enters this path for both Ctrl-C/SIGINT and Unix SIGTERM;
+failure to install either signal listener is fatal rather than ignored:
 
 ```text
 PAUSE DATA

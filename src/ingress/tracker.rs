@@ -15,6 +15,7 @@ struct PartitionProgress {
     assignment_epoch: u64,
     pending: BTreeMap<i64, DeliveryState>,
     safe_next_offset: Option<i64>,
+    last_delivered_offset: Option<i64>,
 }
 
 impl PartitionProgress {
@@ -23,6 +24,7 @@ impl PartitionProgress {
             assignment_epoch,
             pending: BTreeMap::new(),
             safe_next_offset: None,
+            last_delivered_offset: None,
         }
     }
 }
@@ -57,6 +59,14 @@ pub enum TrackerError {
     DuplicateDelivery {
         topic_partition: TopicPartition,
         record_offset: i64,
+    },
+    #[error(
+        "non-monotonic delivery for {topic_partition}: offset {record_offset} followed {last_delivered_offset}"
+    )]
+    NonMonotonicDelivery {
+        topic_partition: TopicPartition,
+        record_offset: i64,
+        last_delivered_offset: i64,
     },
     #[error(
         "completion references unknown delivery for {topic_partition} at offset {record_offset}"
@@ -116,22 +126,26 @@ impl OffsetTracker {
             });
         }
 
-        if progress
-            .safe_next_offset
-            .is_some_and(|safe_next| token.record_offset < safe_next)
-        {
-            return Ok(());
-        }
-        if progress
-            .pending
-            .insert(token.record_offset, DeliveryState::Pending)
-            .is_some()
-        {
+        if progress.pending.contains_key(&token.record_offset) {
             return Err(TrackerError::DuplicateDelivery {
                 topic_partition: token.topic_partition.clone(),
                 record_offset: token.record_offset,
             });
         }
+        if let Some(last_delivered_offset) = progress.last_delivered_offset
+            && token.record_offset <= last_delivered_offset
+        {
+            return Err(TrackerError::NonMonotonicDelivery {
+                topic_partition: token.topic_partition.clone(),
+                record_offset: token.record_offset,
+                last_delivered_offset,
+            });
+        }
+
+        let _ = progress
+            .pending
+            .insert(token.record_offset, DeliveryState::Pending);
+        progress.last_delivered_offset = Some(token.record_offset);
         Ok(())
     }
 
@@ -319,5 +333,37 @@ mod tests {
             tracker.on_delivered(&token(1, 1)),
             Err(TrackerError::DeliveryEpochMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn rejects_non_monotonic_delivery_within_an_assignment() {
+        let mut tracker = OffsetTracker::default();
+        tracker.ensure_assigned(token(102, 11).topic_partition, 11);
+        tracker.on_delivered(&token(102, 11)).unwrap();
+        tracker.on_success(&token(102, 11)).unwrap();
+
+        assert_eq!(
+            tracker.on_delivered(&token(100, 11)).unwrap_err(),
+            TrackerError::NonMonotonicDelivery {
+                topic_partition: TopicPartition::new("signals", 2),
+                record_offset: 100,
+                last_delivered_offset: 102,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_pending_delivery() {
+        let mut tracker = OffsetTracker::default();
+        tracker.ensure_assigned(token(100, 12).topic_partition, 12);
+        tracker.on_delivered(&token(100, 12)).unwrap();
+
+        assert_eq!(
+            tracker.on_delivered(&token(100, 12)).unwrap_err(),
+            TrackerError::DuplicateDelivery {
+                topic_partition: TopicPartition::new("signals", 2),
+                record_offset: 100,
+            }
+        );
     }
 }

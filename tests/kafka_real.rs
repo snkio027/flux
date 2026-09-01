@@ -93,6 +93,9 @@ async fn crash_restart_replays_from_first_unacked_gap() -> Result<()> {
             .context("timed out waiting for first-run delivery")?
             .context("first-run sink closed early")?;
     }
+    let observer = offset_observer(&bootstrap_servers, GROUP)?;
+    wait_for_committed(&observer, TOPIC, blocked_offset).await?;
+
     first_run.abort();
     let abort_error = timeout(Duration::from_secs(10), first_run)
         .await
@@ -103,11 +106,10 @@ async fn crash_restart_replays_from_first_unacked_gap() -> Result<()> {
         bail!("crashed ingress task failed unexpectedly: {abort_error}");
     }
 
-    let observer = offset_observer(&bootstrap_servers, GROUP)?;
     let first_committed = committed_offset(&observer, TOPIC)?;
-    if first_committed.is_some_and(|offset| offset > blocked_offset) {
+    if first_committed != Some(blocked_offset) {
         bail!(
-            "safe prefix crossed the unacked gap: committed={first_committed:?}, gap={blocked_offset}"
+            "crash changed the committed safe prefix: committed={first_committed:?}, gap={blocked_offset}"
         );
     }
 
@@ -136,9 +138,9 @@ async fn crash_restart_replays_from_first_unacked_gap() -> Result<()> {
         .await
         .context("timed out waiting for replay")?
         .context("replay sink closed early")?;
-    if replay_start > blocked_offset || replay_start == expected_end {
+    if replay_start != blocked_offset {
         bail!(
-            "restart skipped the first unacked gap: replay_start={replay_start}, gap={blocked_offset}, end={expected_end}"
+            "restart did not resume exactly at the first unacked gap: replay_start={replay_start}, gap={blocked_offset}, end={expected_end}"
         );
     }
     wait_for_committed(&observer, TOPIC, expected_end).await?;
