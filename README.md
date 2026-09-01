@@ -14,7 +14,9 @@ cargo run -- config.toml
 `FLUX_CONFIG` can provide the config path when no command-line path is passed.
 Set `RUST_LOG` to adjust logging. The current downstream implementation is a
 `DiscardSink` used to prove the ingress contract; replace it with the real
-processor while preserving the `Completion` protocol.
+processor through `run_with_sink`. Downstream code consumes each
+`IngressRecord` into `record.succeed()` or `record.fail(reason)`; assignment
+tokens remain private to the ingress correctness kernel.
 
 The complete correctness contract is in
 [`docs/kafka-ingress-v1.md`](docs/kafka-ingress-v1.md).

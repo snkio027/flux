@@ -88,12 +88,13 @@ because librdkafka can expand its fetch size to retrieve an oversized record.
 
 ## Failure and shutdown policy
 
-v1 deliberately has no retry scheduler. `Completion::Failed` is fatal. Adding a
+v1 deliberately has no retry scheduler. `IngressRecord::fail()` produces a
+fatal completion. Adding a
 retryable flag without a retry state machine would promise behavior that does
 not exist. A future revision can introduce explicit retry, quarantine, and fatal
 dispositions.
 
-Shutdown uses this sequence, bounded by `shutdown_grace_ms` (30 seconds by
+Shutdown uses this sequence, bounded by `shutdown.grace_ms` (30 seconds by
 default). The service enters this path for both Ctrl-C/SIGINT and Unix SIGTERM;
 failure to install either signal listener is fatal rather than ignored:
 
@@ -110,6 +111,35 @@ PAUSE DATA
 If the drain deadline expires, the runner stops waiting, commits only ACKs
 already reflected in the safe prefix, aborts the downstream task, and exits
 non-zero. Unfinished work is replayed after restart.
+
+## Module and API boundary
+
+The crate keeps the downstream contract small: `run`, `run_with_sink`,
+`IngressRecord`, `Completion`, and `RecordHeader`. Assignment epochs, delivery
+tokens, the tracker, the runner, and librdkafka context types remain internal.
+Downstream code inspects records through accessors and consumes ownership into
+`record.succeed()` or `record.fail(reason)`, so it cannot construct or alter an
+assignment token.
+
+Internal responsibilities are separated by change axis:
+
+```text
+app.rs                    task assembly and supervision
+ingress/client.rs         librdkafka client construction
+ingress/context.rs        librdkafka callbacks
+ingress/assignment.rs     assignment identity and store fencing
+ingress/record.rs         ingress/downstream ownership contract
+ingress/tracker.rs        safe-prefix calculation
+ingress/backpressure.rs   high/low watermark policy
+ingress/runner.rs         event loop and shutdown sequencing
+downstream/discard.rs     proof downstream
+```
+
+Configuration ownership follows the same boundary: `[kafka]` contains broker
+and consumer settings, `[ingress]` contains application capacity and payload
+limits, `[ingress.backpressure]` contains watermarks, and `[shutdown]` contains
+the drain grace period. Legacy runtime fields under `[kafka]` remain accepted
+with identical values, but cannot be mixed with their structured replacements.
 
 ## Fixed consumer contract
 

@@ -2,8 +2,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use flux::{
-    config::{AppConfig, AutoOffsetReset, KafkaConfig},
-    ingress::Completion,
+    config::{
+        AppConfig, AutoOffsetReset, BackpressureConfig, IngressConfig, KafkaConfig, ShutdownConfig,
+    },
     run, run_with_sink,
 };
 use rdkafka::{
@@ -133,13 +134,8 @@ async fn downstream_failure_does_not_commit_the_failed_record() -> Result<()> {
                     .recv()
                     .await
                     .context("sink closed before receiving the record")?;
-                let token = record.token.clone();
-                drop(record);
                 completions
-                    .send(Completion::Failed {
-                        token,
-                        reason: "synthetic downstream rejection".into(),
-                    })
+                    .send(record.fail("synthetic downstream rejection"))
                     .await
                     .map_err(|_| anyhow!("completion receiver closed"))?;
                 Ok(())
@@ -247,16 +243,19 @@ fn test_config(bootstrap_servers: &str, group_id: &str, topic: &str) -> AppConfi
             auto_commit_interval_ms: 100,
             session_timeout_ms: 6_000,
             max_poll_interval_ms: 10_000,
+            prefetch_max_kbytes: 1_024,
+        },
+        ingress: IngressConfig {
             work_queue_capacity: 2,
             completion_queue_capacity: 2,
             memory_budget_bytes: 1_024,
-            record_accounting_overhead_bytes: 128,
             max_payload_bytes: 512,
-            prefetch_max_kbytes: 1_024,
-            pause_high_watermark_percent: 80,
-            resume_low_watermark_percent: 50,
-            shutdown_grace_ms: 2_000,
+            backpressure: BackpressureConfig {
+                pause_high_watermark_percent: 80,
+                resume_low_watermark_percent: 50,
+            },
         },
+        shutdown: ShutdownConfig { grace_ms: 2_000 },
     }
 }
 

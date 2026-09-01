@@ -4,14 +4,16 @@ use anyhow::{Result, anyhow};
 use rdkafka::message::{BorrowedMessage, Headers, Message};
 use tokio::sync::OwnedSemaphorePermit;
 
+use crate::config::RECORD_ACCOUNTING_OVERHEAD_BYTES;
+
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct TopicPartition {
-    pub topic: Arc<str>,
-    pub partition: i32,
+pub(crate) struct TopicPartition {
+    pub(crate) topic: Arc<str>,
+    pub(crate) partition: i32,
 }
 
 impl TopicPartition {
-    pub fn new(topic: impl Into<Arc<str>>, partition: i32) -> Self {
+    pub(crate) fn new(topic: impl Into<Arc<str>>, partition: i32) -> Self {
         Self {
             topic: topic.into(),
             partition,
@@ -26,34 +28,97 @@ impl fmt::Display for TopicPartition {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DeliveryToken {
-    pub topic_partition: TopicPartition,
-    pub record_offset: i64,
-    pub assignment_epoch: u64,
+pub(crate) struct DeliveryToken {
+    pub(crate) topic_partition: TopicPartition,
+    pub(crate) record_offset: i64,
+    pub(crate) assignment_epoch: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecordHeader {
-    pub key: Box<str>,
-    pub value: Option<Box<[u8]>>,
+    key: Box<str>,
+    value: Option<Box<[u8]>>,
 }
 
-/// An owned Kafka record. The byte permit is intentionally retained for the
+impl RecordHeader {
+    #[must_use]
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    #[must_use]
+    pub fn value(&self) -> Option<&[u8]> {
+        self.value.as_deref()
+    }
+}
+
+/// An owned ingress record. The byte permit is intentionally retained for the
 /// entire downstream lifetime of the record.
 pub struct IngressRecord {
-    pub token: DeliveryToken,
-    pub key: Option<Box<[u8]>>,
-    pub payload: Option<Box<[u8]>>,
-    pub headers: Vec<RecordHeader>,
-    pub timestamp_millis: Option<i64>,
+    token: DeliveryToken,
+    key: Option<Box<[u8]>>,
+    payload: Option<Box<[u8]>>,
+    headers: Vec<RecordHeader>,
+    timestamp_millis: Option<i64>,
     accounted_bytes: u32,
     _memory_permit: OwnedSemaphorePermit,
 }
 
 impl IngressRecord {
     #[must_use]
+    pub fn topic(&self) -> &str {
+        &self.token.topic_partition.topic
+    }
+
+    #[must_use]
+    pub fn partition(&self) -> i32 {
+        self.token.topic_partition.partition
+    }
+
+    #[must_use]
+    pub fn offset(&self) -> i64 {
+        self.token.record_offset
+    }
+
+    #[must_use]
+    pub fn key(&self) -> Option<&[u8]> {
+        self.key.as_deref()
+    }
+
+    #[must_use]
+    pub fn payload(&self) -> Option<&[u8]> {
+        self.payload.as_deref()
+    }
+
+    #[must_use]
+    pub fn headers(&self) -> &[RecordHeader] {
+        &self.headers
+    }
+
+    #[must_use]
+    pub fn timestamp_millis(&self) -> Option<i64> {
+        self.timestamp_millis
+    }
+
+    #[must_use]
     pub fn accounted_bytes(&self) -> u32 {
         self.accounted_bytes
+    }
+
+    #[must_use]
+    pub fn succeed(self) -> Completion {
+        Completion {
+            token: self.token.clone(),
+            outcome: CompletionOutcome::Succeeded,
+        }
+    }
+
+    #[must_use]
+    pub fn fail(self, reason: impl Into<Box<str>>) -> Completion {
+        Completion {
+            token: self.token.clone(),
+            outcome: CompletionOutcome::Failed(reason.into()),
+        }
     }
 
     pub(crate) fn from_pending(
@@ -87,12 +152,21 @@ impl fmt::Debug for IngressRecord {
 }
 
 #[derive(Debug)]
-pub enum Completion {
-    Succeeded(DeliveryToken),
-    Failed {
-        token: DeliveryToken,
-        reason: Box<str>,
-    },
+pub struct Completion {
+    token: DeliveryToken,
+    outcome: CompletionOutcome,
+}
+
+impl Completion {
+    pub(crate) fn into_parts(self) -> (DeliveryToken, CompletionOutcome) {
+        (self.token, self.outcome)
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum CompletionOutcome {
+    Succeeded,
+    Failed(Box<str>),
 }
 
 pub(crate) struct PendingRecord {
@@ -105,10 +179,9 @@ pub(crate) struct PendingRecord {
 }
 
 impl PendingRecord {
-    pub fn from_message(
+    pub(crate) fn from_message(
         message: &BorrowedMessage<'_>,
         assignment_epoch: u64,
-        fixed_overhead_bytes: usize,
     ) -> Result<Self> {
         let topic_partition = TopicPartition::new(message.topic(), message.partition());
         let token = DeliveryToken {
@@ -116,7 +189,7 @@ impl PendingRecord {
             record_offset: message.offset(),
             assignment_epoch,
         };
-        let accounted_bytes = accounted_record_bytes(message, fixed_overhead_bytes)?;
+        let accounted_bytes = accounted_record_bytes(message)?;
 
         let headers = message
             .headers()
@@ -144,11 +217,8 @@ impl PendingRecord {
     }
 }
 
-pub(crate) fn accounted_record_bytes(
-    message: &BorrowedMessage<'_>,
-    fixed_overhead_bytes: usize,
-) -> Result<u32> {
-    let mut bytes = fixed_overhead_bytes;
+fn accounted_record_bytes(message: &BorrowedMessage<'_>) -> Result<u32> {
+    let mut bytes = RECORD_ACCOUNTING_OVERHEAD_BYTES;
     checked_add(&mut bytes, message.key().map_or(0, <[u8]>::len))?;
     checked_add(&mut bytes, message.payload().map_or(0, <[u8]>::len))?;
 

@@ -13,8 +13,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use super::{
-    AckEffect, AssignmentRegistry, Completion, IngressRecord, OffsetSnapshot, OffsetTracker,
-    RebalanceEvent, TopicPartition, model::PendingRecord,
+    AckEffect, AssignmentRegistry, Completion, CompletionOutcome, IngressRecord, OffsetSnapshot,
+    OffsetTracker, PendingRecord, RebalanceEvent, TopicPartition,
+    backpressure::{BackpressurePolicy, BudgetUsage},
 };
 
 use super::context::ManagedConsumer;
@@ -25,33 +26,30 @@ enum DispatchOutcome {
     Shutdown,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct BackpressurePolicy {
-    pause_high_percent: u8,
-    resume_low_percent: u8,
+pub(crate) struct RunnerChannels {
+    pub(crate) rebalance_rx: mpsc::UnboundedReceiver<RebalanceEvent>,
+    pub(crate) work_tx: mpsc::Sender<IngressRecord>,
+    pub(crate) completion_rx: mpsc::Receiver<Completion>,
 }
 
 #[derive(Clone, Copy, Debug)]
-struct BudgetUsage {
-    queue_used: usize,
-    queue_total: usize,
-    bytes_used: usize,
-    bytes_total: usize,
+pub(crate) struct RunnerConfig {
+    pub(crate) memory_budget_bytes: usize,
+    pub(crate) max_payload_bytes: usize,
+    pub(crate) pause_high_watermark_percent: u8,
+    pub(crate) resume_low_watermark_percent: u8,
+    pub(crate) shutdown_grace: Duration,
 }
 
-impl BackpressurePolicy {
-    fn should_pause(self, usage: BudgetUsage) -> bool {
-        reached_percent(usage.queue_used, usage.queue_total, self.pause_high_percent)
-            || reached_percent(usage.bytes_used, usage.bytes_total, self.pause_high_percent)
-    }
-
-    fn should_resume(self, usage: BudgetUsage) -> bool {
-        at_or_below_percent(usage.queue_used, usage.queue_total, self.resume_low_percent)
-            && at_or_below_percent(usage.bytes_used, usage.bytes_total, self.resume_low_percent)
-    }
+pub(crate) struct RunnerInputs {
+    pub(crate) consumer: ManagedConsumer,
+    pub(crate) registry: Arc<AssignmentRegistry>,
+    pub(crate) channels: RunnerChannels,
+    pub(crate) config: RunnerConfig,
+    pub(crate) shutdown: CancellationToken,
 }
 
-pub struct KafkaRunner {
+pub(crate) struct KafkaRunner {
     consumer: ManagedConsumer,
     registry: Arc<AssignmentRegistry>,
     rebalance_rx: mpsc::UnboundedReceiver<RebalanceEvent>,
@@ -59,7 +57,6 @@ pub struct KafkaRunner {
     completion_rx: mpsc::Receiver<Completion>,
     memory_budget: Arc<Semaphore>,
     memory_budget_bytes: u32,
-    record_accounting_overhead_bytes: usize,
     max_payload_bytes: usize,
     backpressure: BackpressurePolicy,
     shutdown_grace: Duration,
@@ -69,44 +66,30 @@ pub struct KafkaRunner {
 }
 
 impl KafkaRunner {
-    #[allow(clippy::too_many_arguments)]
     /// Builds a runner after converting the configured byte budget to semaphore permits.
     ///
     /// # Errors
     ///
     /// Returns an error when the byte budget is outside Tokio's permit range.
-    pub fn new(
-        consumer: ManagedConsumer,
-        registry: Arc<AssignmentRegistry>,
-        rebalance_rx: mpsc::UnboundedReceiver<RebalanceEvent>,
-        work_tx: mpsc::Sender<IngressRecord>,
-        completion_rx: mpsc::Receiver<Completion>,
-        memory_budget_bytes: usize,
-        record_accounting_overhead_bytes: usize,
-        max_payload_bytes: usize,
-        pause_high_watermark_percent: u8,
-        resume_low_watermark_percent: u8,
-        shutdown_grace: Duration,
-        shutdown: CancellationToken,
-    ) -> Result<Self> {
-        let memory_budget_bytes = u32::try_from(memory_budget_bytes)
+    pub(crate) fn new(inputs: RunnerInputs) -> Result<Self> {
+        let memory_budget_bytes = u32::try_from(inputs.config.memory_budget_bytes)
             .context("Kafka memory budget exceeds the semaphore permit range")?;
+        let channels = inputs.channels;
         Ok(Self {
-            consumer,
-            registry,
-            rebalance_rx,
-            work_tx: Some(work_tx),
-            completion_rx,
+            consumer: inputs.consumer,
+            registry: inputs.registry,
+            rebalance_rx: channels.rebalance_rx,
+            work_tx: Some(channels.work_tx),
+            completion_rx: channels.completion_rx,
             memory_budget: Arc::new(Semaphore::new(memory_budget_bytes as usize)),
             memory_budget_bytes,
-            record_accounting_overhead_bytes,
-            max_payload_bytes,
-            backpressure: BackpressurePolicy {
-                pause_high_percent: pause_high_watermark_percent,
-                resume_low_percent: resume_low_watermark_percent,
-            },
-            shutdown_grace,
-            shutdown,
+            max_payload_bytes: inputs.config.max_payload_bytes,
+            backpressure: BackpressurePolicy::new(
+                inputs.config.pause_high_watermark_percent,
+                inputs.config.resume_low_watermark_percent,
+            ),
+            shutdown_grace: inputs.config.shutdown_grace,
+            shutdown: inputs.shutdown,
             tracker: OffsetTracker::default(),
             paused: false,
         })
@@ -117,7 +100,7 @@ impl KafkaRunner {
     /// # Errors
     ///
     /// Returns an error for Kafka, downstream, backpressure, commit, or shutdown failures.
-    pub async fn run(mut self) -> Result<()> {
+    pub(crate) async fn run(mut self) -> Result<()> {
         let consume_error = self.consume_until_stop().await.err();
         let shutdown_error = self.drain_and_commit().await.err();
 
@@ -178,11 +161,7 @@ impl KafkaRunner {
                     };
                     self.tracker
                         .ensure_assigned(topic_partition, assignment_epoch);
-                    let pending = PendingRecord::from_message(
-                        &message,
-                        assignment_epoch,
-                        self.record_accounting_overhead_bytes,
-                    )?;
+                    let pending = PendingRecord::from_message(&message, assignment_epoch)?;
                     drop(message);
 
                     match self.dispatch(pending).await? {
@@ -301,8 +280,9 @@ impl KafkaRunner {
     }
 
     fn handle_completion(&mut self, completion: Completion) -> Result<()> {
-        match completion {
-            Completion::Succeeded(token) => {
+        let (token, outcome) = completion.into_parts();
+        match outcome {
+            CompletionOutcome::Succeeded => {
                 let effect = self.tracker.on_success(&token)?;
                 if let AckEffect::StoreNext(snapshot) = effect {
                     // `store_offset()` is the legacy singular API and stores
@@ -310,11 +290,9 @@ impl KafkaRunner {
                     // offset, so the exact-value `store_offsets()` API is
                     // required here.
                     let offsets = topic_partition_list(std::slice::from_ref(&snapshot))?;
-                    let store_result = self.registry.with_current(
-                        &snapshot.topic_partition,
-                        snapshot.assignment_epoch,
-                        || self.consumer.store_offsets(&offsets),
-                    );
+                    let store_result = self
+                        .registry
+                        .store_if_current(&snapshot, || self.consumer.store_offsets(&offsets));
                     if let Some(result) = store_result {
                         result.with_context(|| {
                             format!(
@@ -332,7 +310,7 @@ impl KafkaRunner {
                 }
                 Ok(())
             }
-            Completion::Failed { token, reason } => bail!(
+            CompletionOutcome::Failed(reason) => bail!(
                 "downstream processing failed for {} offset {}: {}",
                 token.topic_partition,
                 token.record_offset,
@@ -399,28 +377,28 @@ impl KafkaRunner {
         let Some(work_tx) = self.work_tx.as_ref() else {
             return Ok(());
         };
-        let usage = BudgetUsage {
-            queue_used: work_tx.max_capacity() - work_tx.capacity(),
-            queue_total: work_tx.max_capacity(),
-            bytes_used: self.memory_budget_bytes as usize - self.memory_budget.available_permits(),
-            bytes_total: self.memory_budget_bytes as usize,
-        };
+        let usage = BudgetUsage::new(
+            work_tx.max_capacity() - work_tx.capacity(),
+            work_tx.max_capacity(),
+            self.memory_budget_bytes as usize - self.memory_budget.available_permits(),
+            self.memory_budget_bytes as usize,
+        );
 
         if self.paused && self.backpressure.should_resume(usage) {
             debug!(
-                queue_used = usage.queue_used,
-                queue_total = usage.queue_total,
-                bytes_used = usage.bytes_used,
-                bytes_total = usage.bytes_total,
+                queue_used = usage.queue_used(),
+                queue_total = usage.queue_total(),
+                bytes_used = usage.bytes_used(),
+                bytes_total = usage.bytes_total(),
                 "resuming Kafka after low watermark"
             );
             self.resume_current_assignment()?;
         } else if !self.paused && self.backpressure.should_pause(usage) {
             debug!(
-                queue_used = usage.queue_used,
-                queue_total = usage.queue_total,
-                bytes_used = usage.bytes_used,
-                bytes_total = usage.bytes_total,
+                queue_used = usage.queue_used(),
+                queue_total = usage.queue_total(),
+                bytes_used = usage.bytes_used(),
+                bytes_total = usage.bytes_total(),
                 "pausing Kafka at high watermark"
             );
             self.pause_current_assignment()?;
@@ -518,14 +496,6 @@ impl KafkaRunner {
     }
 }
 
-fn reached_percent(used: usize, total: usize, percent: u8) -> bool {
-    (used as u128) * 100 >= (total as u128) * u128::from(percent)
-}
-
-fn at_or_below_percent(used: usize, total: usize, percent: u8) -> bool {
-    (used as u128) * 100 <= (total as u128) * u128::from(percent)
-}
-
 async fn completed_before_deadline(deadline: Duration, future: impl Future<Output = ()>) -> bool {
     tokio::time::timeout(deadline, future).await.is_ok()
 }
@@ -554,39 +524,6 @@ mod tests {
     use std::future::pending;
 
     use super::*;
-
-    #[test]
-    fn backpressure_uses_high_low_hysteresis_across_both_budgets() {
-        let policy = BackpressurePolicy {
-            pause_high_percent: 80,
-            resume_low_percent: 50,
-        };
-
-        assert!(policy.should_pause(BudgetUsage {
-            queue_used: 8,
-            queue_total: 10,
-            bytes_used: 1,
-            bytes_total: 10,
-        }));
-        assert!(policy.should_pause(BudgetUsage {
-            queue_used: 1,
-            queue_total: 10,
-            bytes_used: 8,
-            bytes_total: 10,
-        }));
-        assert!(!policy.should_resume(BudgetUsage {
-            queue_used: 5,
-            queue_total: 10,
-            bytes_used: 6,
-            bytes_total: 10,
-        }));
-        assert!(policy.should_resume(BudgetUsage {
-            queue_used: 5,
-            queue_total: 10,
-            bytes_used: 5,
-            bytes_total: 10,
-        }));
-    }
 
     #[tokio::test]
     async fn shutdown_deadline_expires_for_stuck_work() {

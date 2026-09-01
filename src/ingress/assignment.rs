@@ -1,13 +1,14 @@
 use std::{collections::HashMap, sync::Mutex};
 
+use rdkafka::error::KafkaResult;
 use thiserror::Error;
 
-use super::TopicPartition;
+use super::{OffsetSnapshot, TopicPartition};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Assignment {
-    pub topic_partition: TopicPartition,
-    pub assignment_epoch: u64,
+pub(crate) struct Assignment {
+    pub(crate) topic_partition: TopicPartition,
+    pub(crate) assignment_epoch: u64,
 }
 
 #[derive(Debug, Default)]
@@ -17,7 +18,7 @@ struct RegistryState {
 }
 
 #[derive(Debug, Default)]
-pub struct AssignmentRegistry {
+pub(crate) struct AssignmentRegistry {
     state: Mutex<RegistryState>,
 }
 
@@ -73,24 +74,26 @@ impl AssignmentRegistry {
         self.current_epoch(&assignment.topic_partition) == Some(assignment.assignment_epoch)
     }
 
-    /// Runs a local, non-blocking operation only while the token's epoch is
-    /// current. Rebalance callbacks use the same mutex, so revocation cannot
-    /// interleave between this check and a local offset-store update.
-    pub(crate) fn with_current<T>(
+    /// Stores a local offset only while its assignment epoch is current.
+    /// Rebalance callbacks use the same mutex, so revocation cannot interleave
+    /// between the epoch check and the local store update.
+    pub(crate) fn store_if_current(
         &self,
-        topic_partition: &TopicPartition,
-        assignment_epoch: u64,
-        operation: impl FnOnce() -> T,
-    ) -> Option<T> {
+        snapshot: &OffsetSnapshot,
+        store: impl FnOnce() -> KafkaResult<()>,
+    ) -> Option<KafkaResult<()>> {
         let state = self.lock();
-        if state.epochs.get(topic_partition).copied() == Some(assignment_epoch) {
-            Some(operation())
+        if state.epochs.get(&snapshot.topic_partition).copied() == Some(snapshot.assignment_epoch) {
+            Some(store())
         } else {
             None
         }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, RegistryState> {
+        // Registry mutations contain no user code and update a single map
+        // entry atomically. Recovering the intact guard keeps a prior panic
+        // from disabling all future rebalance fencing.
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

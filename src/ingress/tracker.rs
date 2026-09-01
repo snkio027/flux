@@ -30,21 +30,21 @@ impl PartitionProgress {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum AckEffect {
+pub(crate) enum AckEffect {
     StoreNext(OffsetSnapshot),
     Stale,
     Unchanged,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct OffsetSnapshot {
-    pub topic_partition: TopicPartition,
-    pub safe_next_offset: i64,
-    pub assignment_epoch: u64,
+pub(crate) struct OffsetSnapshot {
+    pub(crate) topic_partition: TopicPartition,
+    pub(crate) safe_next_offset: i64,
+    pub(crate) assignment_epoch: u64,
 }
 
 #[derive(Debug, Error, Eq, PartialEq)]
-pub enum TrackerError {
+pub(crate) enum TrackerError {
     #[error("delivery references unassigned partition {0}")]
     UnassignedDelivery(TopicPartition),
     #[error(
@@ -80,13 +80,17 @@ pub enum TrackerError {
 }
 
 #[derive(Debug, Default)]
-pub struct OffsetTracker {
+pub(crate) struct OffsetTracker {
     partitions: HashMap<TopicPartition, PartitionProgress>,
 }
 
 impl OffsetTracker {
     /// Idempotently aligns business tracking to the callback-owned epoch.
-    pub fn ensure_assigned(&mut self, topic_partition: TopicPartition, assignment_epoch: u64) {
+    pub(crate) fn ensure_assigned(
+        &mut self,
+        topic_partition: TopicPartition,
+        assignment_epoch: u64,
+    ) {
         let matches_current = self
             .partitions
             .get(&topic_partition)
@@ -97,7 +101,7 @@ impl OffsetTracker {
         }
     }
 
-    pub fn revoke(&mut self, topic_partition: &TopicPartition, assignment_epoch: u64) {
+    pub(crate) fn revoke(&mut self, topic_partition: &TopicPartition, assignment_epoch: u64) {
         let should_remove = self
             .partitions
             .get(topic_partition)
@@ -112,7 +116,7 @@ impl OffsetTracker {
     /// # Errors
     ///
     /// Returns an error for missing/mismatched assignments or duplicate in-flight offsets.
-    pub fn on_delivered(&mut self, token: &DeliveryToken) -> Result<(), TrackerError> {
+    pub(crate) fn on_delivered(&mut self, token: &DeliveryToken) -> Result<(), TrackerError> {
         let Some(progress) = self.partitions.get_mut(&token.topic_partition) else {
             return Err(TrackerError::UnassignedDelivery(
                 token.topic_partition.clone(),
@@ -154,7 +158,7 @@ impl OffsetTracker {
     /// # Errors
     ///
     /// Returns an error for unknown deliveries or offset overflow.
-    pub fn on_success(&mut self, token: &DeliveryToken) -> Result<AckEffect, TrackerError> {
+    pub(crate) fn on_success(&mut self, token: &DeliveryToken) -> Result<AckEffect, TrackerError> {
         let Some(progress) = self.partitions.get_mut(&token.topic_partition) else {
             return Ok(AckEffect::Stale);
         };
@@ -207,7 +211,7 @@ impl OffsetTracker {
     }
 
     #[must_use]
-    pub fn safe_snapshot(&self) -> Vec<OffsetSnapshot> {
+    pub(crate) fn safe_snapshot(&self) -> Vec<OffsetSnapshot> {
         let mut snapshot = self
             .partitions
             .iter()
