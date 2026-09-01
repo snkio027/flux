@@ -9,24 +9,23 @@ use rdkafka::{
 use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
 
-use super::{TopicPartition, assignment::Assignment};
-use crate::ingress::AssignmentRegistry;
+use super::{TopicPartition, assignment::Assignment, assignment::AssignmentRegistry};
 
 #[derive(Debug)]
-pub enum RebalanceEvent {
+pub(crate) enum RebalanceEvent {
     Assigned(Vec<Assignment>),
     Revoked(Vec<Assignment>),
     Error(Box<str>),
 }
 
 #[derive(Clone)]
-pub struct KafkaContext {
+pub(crate) struct KafkaContext {
     registry: Arc<AssignmentRegistry>,
     events: mpsc::UnboundedSender<RebalanceEvent>,
 }
 
 impl KafkaContext {
-    pub fn new(
+    pub(crate) fn new(
         registry: Arc<AssignmentRegistry>,
         events: mpsc::UnboundedSender<RebalanceEvent>,
     ) -> Self {
@@ -75,7 +74,7 @@ impl ConsumerContext for KafkaContext {
     }
 }
 
-pub type ManagedConsumer = StreamConsumer<KafkaContext>;
+pub(crate) type ManagedConsumer = StreamConsumer<KafkaContext>;
 
 fn topic_partitions(list: &TopicPartitionList) -> Vec<TopicPartition> {
     list.elements()

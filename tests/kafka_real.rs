@@ -2,8 +2,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use flux::{
-    config::{AppConfig, AutoOffsetReset, KafkaConfig},
-    ingress::Completion,
+    config::{
+        AppConfig, AutoOffsetReset, BackpressureConfig, IngressConfig, KafkaConfig, ShutdownConfig,
+    },
     run_with_sink,
 };
 use rdkafka::{
@@ -71,14 +72,15 @@ async fn crash_restart_replays_from_first_unacked_gap() -> Result<()> {
         CancellationToken::new(),
         move |mut records, completions| async move {
             while let Some(record) = records.recv().await {
-                let token = record.token.clone();
+                let offset = record.offset();
                 seen_tx
-                    .send(token.record_offset)
+                    .send(offset)
                     .map_err(|_| anyhow!("first-run observer closed"))?;
-                drop(record);
-                if token.record_offset != blocked_offset {
+                if offset == blocked_offset {
+                    drop(record);
+                } else {
                     completions
-                        .send(Completion::Succeeded(token))
+                        .send(record.succeed())
                         .await
                         .map_err(|_| anyhow!("first-run completion receiver closed"))?;
                 }
@@ -120,13 +122,12 @@ async fn crash_restart_replays_from_first_unacked_gap() -> Result<()> {
         second_shutdown.clone(),
         move |mut records, completions| async move {
             while let Some(record) = records.recv().await {
-                let token = record.token.clone();
+                let offset = record.offset();
                 replay_tx
-                    .send(token.record_offset)
+                    .send(offset)
                     .map_err(|_| anyhow!("replay observer closed"))?;
-                drop(record);
                 completions
-                    .send(Completion::Succeeded(token))
+                    .send(record.succeed())
                     .await
                     .map_err(|_| anyhow!("replay completion receiver closed"))?;
             }
@@ -182,16 +183,19 @@ fn test_config(bootstrap_servers: &str, group_id: &str) -> AppConfig {
             auto_commit_interval_ms: 100,
             session_timeout_ms: 6_000,
             max_poll_interval_ms: 30_000,
+            prefetch_max_kbytes: 4 * 1024,
+        },
+        ingress: IngressConfig {
             work_queue_capacity: 256,
             completion_queue_capacity: 256,
             memory_budget_bytes: 4 * 1024 * 1024,
-            record_accounting_overhead_bytes: 128,
             max_payload_bytes: 1024,
-            prefetch_max_kbytes: 4 * 1024,
-            pause_high_watermark_percent: 80,
-            resume_low_watermark_percent: 50,
-            shutdown_grace_ms: 5_000,
+            backpressure: BackpressureConfig {
+                pause_high_watermark_percent: 80,
+                resume_low_watermark_percent: 50,
+            },
         },
+        shutdown: ShutdownConfig { grace_ms: 5_000 },
     }
 }
 

@@ -1,11 +1,16 @@
 mod assignment;
+mod backpressure;
+mod client;
 mod context;
-mod model;
+mod record;
 mod runner;
 mod tracker;
 
-pub use assignment::AssignmentRegistry;
-pub use context::{KafkaContext, ManagedConsumer, RebalanceEvent};
-pub use model::{Completion, DeliveryToken, IngressRecord, RecordHeader, TopicPartition};
-pub use runner::KafkaRunner;
-pub use tracker::{AckEffect, OffsetSnapshot, OffsetTracker, TrackerError};
+pub use record::{Completion, IngressRecord, RecordHeader};
+
+pub(crate) use assignment::AssignmentRegistry;
+pub(crate) use client::build_consumer;
+pub(crate) use context::{KafkaContext, RebalanceEvent};
+pub(crate) use record::{CompletionOutcome, DeliveryToken, PendingRecord, TopicPartition};
+pub(crate) use runner::{KafkaRunner, RunnerChannels, RunnerConfig, RunnerInputs};
+pub(crate) use tracker::{AckEffect, OffsetSnapshot, OffsetTracker};
