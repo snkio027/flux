@@ -51,6 +51,7 @@ pub struct IngressRecord {
 }
 
 impl IngressRecord {
+    #[must_use]
     pub fn accounted_bytes(&self) -> u32 {
         self.accounted_bytes
     }

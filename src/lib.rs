@@ -3,6 +3,8 @@ pub mod ingress;
 pub mod sink;
 
 use std::sync::Arc;
+use std::time::Duration;
+use std::{future::Future, result::Result as StdResult};
 
 use anyhow::{Context, Result, anyhow};
 use rdkafka::{ClientConfig, consumer::Consumer};
@@ -16,7 +18,37 @@ use crate::{
 };
 
 /// Runs the v1 ingress until shutdown or a fail-closed processing error.
+///
+/// # Errors
+///
+/// Returns an error when configuration, Kafka, downstream work, offset commit,
+/// or graceful shutdown fails.
 pub async fn run(config: AppConfig, shutdown: CancellationToken) -> Result<()> {
+    run_with_sink(config, shutdown, run_discard_sink).await
+}
+
+/// Runs ingress with an injected downstream sink while preserving the same ACK contract.
+///
+/// This is primarily useful for correctness tests and future processor integration.
+///
+/// # Errors
+///
+/// Returns an error when configuration, Kafka, downstream work, offset commit,
+/// or graceful shutdown fails.
+pub async fn run_with_sink<S, SinkFuture>(
+    config: AppConfig,
+    shutdown: CancellationToken,
+    sink_factory: S,
+) -> Result<()>
+where
+    S: FnOnce(
+            mpsc::Receiver<ingress::IngressRecord>,
+            mpsc::Sender<ingress::Completion>,
+        ) -> SinkFuture
+        + Send
+        + 'static,
+    SinkFuture: Future<Output = StdResult<(), anyhow::Error>> + Send + 'static,
+{
     config.validate()?;
 
     let (work_tx, work_rx) = mpsc::channel(config.kafka.work_queue_capacity);
@@ -36,7 +68,7 @@ pub async fn run(config: AppConfig, shutdown: CancellationToken) -> Result<()> {
         .subscribe(&topics)
         .context("failed to subscribe to Kafka topics")?;
 
-    let sink = tokio::spawn(run_discard_sink(work_rx, completion_tx));
+    let sink = tokio::spawn(sink_factory(work_rx, completion_tx));
     let runner = KafkaRunner::new(
         consumer,
         registry,
@@ -45,13 +77,22 @@ pub async fn run(config: AppConfig, shutdown: CancellationToken) -> Result<()> {
         completion_rx,
         config.kafka.memory_budget_bytes,
         config.kafka.record_accounting_overhead_bytes,
+        config.kafka.max_payload_bytes,
+        config.kafka.pause_high_watermark_percent,
+        config.kafka.resume_low_watermark_percent,
+        Duration::from_millis(config.kafka.shutdown_grace_ms),
         shutdown,
-    );
+    )?;
 
     let runner_result = runner.run().await;
-    let sink_result = sink
-        .await
-        .map_err(|error| anyhow!("discard sink task failed: {error}"))?;
+    if runner_result.is_err() && !sink.is_finished() {
+        sink.abort();
+    }
+    let sink_result = match sink.await {
+        Ok(result) => result,
+        Err(error) if error.is_cancelled() && runner_result.is_err() => Ok(()),
+        Err(error) => Err(anyhow!("discard sink task failed: {error}")),
+    };
 
     runner_result?;
     sink_result
@@ -70,6 +111,18 @@ fn build_consumer(config: &AppConfig, context: KafkaContext) -> Result<ManagedCo
         )
         .set("enable.auto.offset.store", "false")
         .set("enable.auto.commit", "true")
+        .set("group.protocol", "classic")
+        .set("partition.assignment.strategy", "cooperative-sticky")
+        .set("allow.auto.create.topics", "false")
+        .set("isolation.level", "read_committed")
+        .set(
+            "queued.max.messages.kbytes",
+            kafka.prefetch_max_kbytes.to_string(),
+        )
+        .set(
+            "fetch.message.max.bytes",
+            kafka.max_payload_bytes.to_string(),
+        )
         .set(
             "auto.commit.interval.ms",
             kafka.auto_commit_interval_ms.to_string(),

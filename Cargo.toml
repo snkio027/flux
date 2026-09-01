@@ -2,6 +2,16 @@
 name = "flux"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.98"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+expect_used = "deny"
+unwrap_used = "deny"
 
 [dependencies]
 anyhow = "1"
@@ -13,3 +23,6 @@ tokio-util = { version = "0.7", features = ["rt"] }
 toml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[dev-dependencies]
+testcontainers-modules = { version = "0.15", features = ["kafka"] }

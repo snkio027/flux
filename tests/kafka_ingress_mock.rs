@@ -1,9 +1,10 @@
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use flux::{
     config::{AppConfig, AutoOffsetReset, KafkaConfig},
-    run,
+    ingress::Completion,
+    run, run_with_sink,
 };
 use rdkafka::{
     ClientConfig,
@@ -53,22 +54,7 @@ async fn successful_records_reach_the_broker_committed_prefix() -> Result<()> {
     }
     let expected_next_offset = expected_next_offset.context("no records were produced")?;
 
-    let config = AppConfig {
-        kafka: KafkaConfig {
-            bootstrap_servers: vec![bootstrap_servers.clone()],
-            group_id: GROUP.to_owned(),
-            topics: vec![TOPIC.to_owned()],
-            client_id: "flux-integration-test".to_owned(),
-            auto_offset_reset: AutoOffsetReset::Earliest,
-            auto_commit_interval_ms: 100,
-            session_timeout_ms: 6_000,
-            max_poll_interval_ms: 10_000,
-            work_queue_capacity: 2,
-            completion_queue_capacity: 2,
-            memory_budget_bytes: 1_024,
-            record_accounting_overhead_bytes: 128,
-        },
-    };
+    let config = test_config(&bootstrap_servers, GROUP, TOPIC);
     let shutdown = CancellationToken::new();
     let mut ingress = tokio::spawn(run(config, shutdown.clone()));
 
@@ -105,6 +91,105 @@ async fn successful_records_reach_the_broker_committed_prefix() -> Result<()> {
         bail!("final committed offset was not the next offset after all records");
     }
     Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn downstream_failure_does_not_commit_the_failed_record() -> Result<()> {
+    const TOPIC: &str = "vehicle-signals-failure";
+    const GROUP: &str = "flux-mock-downstream-failure";
+
+    let producer: FutureProducer = ClientConfig::new()
+        .set("test.mock.num.brokers", "1")
+        .create()
+        .context("create producer")?;
+    let cluster = producer
+        .client()
+        .mock_cluster()
+        .context("producer did not expose its mock cluster")?;
+    cluster
+        .create_topic(TOPIC, 1, 1)
+        .context("create mock topic")?;
+    let bootstrap_servers = cluster.bootstrap_servers();
+    drop(cluster);
+
+    producer
+        .send(
+            FutureRecord::to(TOPIC)
+                .key("vehicle-failure")
+                .payload("invalid-signal"),
+            Timeout::After(Duration::from_secs(2)),
+        )
+        .await
+        .map_err(|(error, _)| error)
+        .context("produce failing mock record")?;
+
+    let result = timeout(
+        Duration::from_secs(10),
+        run_with_sink(
+            test_config(&bootstrap_servers, GROUP, TOPIC),
+            CancellationToken::new(),
+            |mut records, completions| async move {
+                let record = records
+                    .recv()
+                    .await
+                    .context("sink closed before receiving the record")?;
+                let token = record.token.clone();
+                drop(record);
+                completions
+                    .send(Completion::Failed {
+                        token,
+                        reason: "synthetic downstream rejection".into(),
+                    })
+                    .await
+                    .map_err(|_| anyhow!("completion receiver closed"))?;
+                Ok(())
+            },
+        ),
+    )
+    .await
+    .context("ingress did not fail closed")?;
+
+    let error = match result {
+        Ok(()) => bail!("ingress accepted a downstream failure"),
+        Err(error) => format!("{error:#}"),
+    };
+    if !error.contains("synthetic downstream rejection") {
+        bail!("ingress returned the wrong downstream failure: {error}");
+    }
+
+    let observer: BaseConsumer = ClientConfig::new()
+        .set("bootstrap.servers", &bootstrap_servers)
+        .set("group.id", GROUP)
+        .create()
+        .context("create committed-offset observer")?;
+    if committed_offset(&observer, TOPIC)?.is_some() {
+        bail!("failed downstream work advanced the committed offset");
+    }
+    Ok(())
+}
+
+fn test_config(bootstrap_servers: &str, group_id: &str, topic: &str) -> AppConfig {
+    AppConfig {
+        kafka: KafkaConfig {
+            bootstrap_servers: vec![bootstrap_servers.to_owned()],
+            group_id: group_id.to_owned(),
+            topics: vec![topic.to_owned()],
+            client_id: "flux-integration-test".to_owned(),
+            auto_offset_reset: AutoOffsetReset::Earliest,
+            auto_commit_interval_ms: 100,
+            session_timeout_ms: 6_000,
+            max_poll_interval_ms: 10_000,
+            work_queue_capacity: 2,
+            completion_queue_capacity: 2,
+            memory_budget_bytes: 1_024,
+            record_accounting_overhead_bytes: 128,
+            max_payload_bytes: 512,
+            prefetch_max_kbytes: 1_024,
+            pause_high_watermark_percent: 80,
+            resume_low_watermark_percent: 50,
+            shutdown_grace_ms: 2_000,
+        },
+    }
 }
 
 fn committed_offset(consumer: &BaseConsumer, topic: &str) -> Result<Option<i64>> {
