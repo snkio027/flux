@@ -18,3 +18,14 @@ processor while preserving the `Completion` protocol.
 
 The complete correctness contract is in
 [`docs/kafka-ingress-v1.md`](docs/kafka-ingress-v1.md).
+
+## Quality gates
+
+The repository pins Rust 1.98 and forbids unsafe code, implicit unwrap/expect,
+and Clippy warnings. Pull requests run formatting, strict Clippy, unit tests,
+the in-process mock Kafka test, and an ignored-by-default Docker-backed real
+Kafka crash/restart replay test. Run the real Kafka gate locally with:
+
+```console
+cargo test --locked --test kafka_real -- --ignored --nocapture
+```

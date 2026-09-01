@@ -7,10 +7,15 @@ const DEFAULT_CLIENT_ID: &str = "vehicle-signal-processor";
 const DEFAULT_AUTO_COMMIT_INTERVAL_MS: u64 = 5_000;
 const DEFAULT_SESSION_TIMEOUT_MS: u64 = 45_000;
 const DEFAULT_MAX_POLL_INTERVAL_MS: u64 = 300_000;
-const DEFAULT_WORK_QUEUE_CAPACITY: usize = 1_024;
-const DEFAULT_COMPLETION_QUEUE_CAPACITY: usize = 1_024;
-const DEFAULT_MEMORY_BUDGET_BYTES: usize = 256 * 1024 * 1024;
+const DEFAULT_WORK_QUEUE_CAPACITY: usize = 2_048;
+const DEFAULT_COMPLETION_QUEUE_CAPACITY: usize = 2_048;
+const DEFAULT_MEMORY_BUDGET_BYTES: usize = 64 * 1024 * 1024;
 const DEFAULT_RECORD_OVERHEAD_BYTES: usize = 128;
+const DEFAULT_MAX_PAYLOAD_BYTES: usize = 1024 * 1024;
+const DEFAULT_PREFETCH_MAX_KBYTES: u32 = 16 * 1024;
+const DEFAULT_PAUSE_HIGH_WATERMARK_PERCENT: u8 = 80;
+const DEFAULT_RESUME_LOW_WATERMARK_PERCENT: u8 = 50;
+const DEFAULT_SHUTDOWN_GRACE_MS: u64 = 30_000;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -19,6 +24,11 @@ pub struct AppConfig {
 }
 
 impl AppConfig {
+    /// Loads and validates a TOML configuration file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file cannot be read, parsed, or validated.
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let source = fs::read_to_string(path)
@@ -29,6 +39,11 @@ impl AppConfig {
         Ok(config)
     }
 
+    /// Validates all cross-field ingress constraints.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error describing the first invalid setting.
     pub fn validate(&self) -> Result<()> {
         self.kafka.validate()
     }
@@ -42,7 +57,6 @@ pub struct KafkaConfig {
     pub topics: Vec<String>,
     #[serde(default = "default_client_id")]
     pub client_id: String,
-    #[serde(default)]
     pub auto_offset_reset: AutoOffsetReset,
     #[serde(default = "default_auto_commit_interval_ms")]
     pub auto_commit_interval_ms: u64,
@@ -58,6 +72,16 @@ pub struct KafkaConfig {
     pub memory_budget_bytes: usize,
     #[serde(default = "default_record_overhead_bytes")]
     pub record_accounting_overhead_bytes: usize,
+    #[serde(default = "default_max_payload_bytes")]
+    pub max_payload_bytes: usize,
+    #[serde(default = "default_prefetch_max_kbytes")]
+    pub prefetch_max_kbytes: u32,
+    #[serde(default = "default_pause_high_watermark_percent")]
+    pub pause_high_watermark_percent: u8,
+    #[serde(default = "default_resume_low_watermark_percent")]
+    pub resume_low_watermark_percent: u8,
+    #[serde(default = "default_shutdown_grace_ms")]
+    pub shutdown_grace_ms: u64,
 }
 
 impl KafkaConfig {
@@ -103,15 +127,31 @@ impl KafkaConfig {
         if self.record_accounting_overhead_bytes > self.memory_budget_bytes {
             bail!("kafka.record_accounting_overhead_bytes exceeds memory_budget_bytes");
         }
+        if self.max_payload_bytes == 0 || self.max_payload_bytes > self.memory_budget_bytes {
+            bail!("kafka.max_payload_bytes must be between 1 and memory_budget_bytes");
+        }
+        if !(1..=2_097_151).contains(&self.prefetch_max_kbytes) {
+            bail!("kafka.prefetch_max_kbytes must be between 1 and 2097151");
+        }
+        if self.resume_low_watermark_percent == 0
+            || self.resume_low_watermark_percent >= self.pause_high_watermark_percent
+            || self.pause_high_watermark_percent > 100
+        {
+            bail!(
+                "Kafka watermarks must satisfy 0 < resume_low_watermark_percent < pause_high_watermark_percent <= 100"
+            );
+        }
+        if self.shutdown_grace_ms == 0 {
+            bail!("kafka.shutdown_grace_ms must be greater than zero");
+        }
         Ok(())
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AutoOffsetReset {
     Earliest,
-    #[default]
     Latest,
     Error,
 }
@@ -158,8 +198,30 @@ fn default_record_overhead_bytes() -> usize {
     DEFAULT_RECORD_OVERHEAD_BYTES
 }
 
+fn default_max_payload_bytes() -> usize {
+    DEFAULT_MAX_PAYLOAD_BYTES
+}
+
+fn default_prefetch_max_kbytes() -> u32 {
+    DEFAULT_PREFETCH_MAX_KBYTES
+}
+
+fn default_pause_high_watermark_percent() -> u8 {
+    DEFAULT_PAUSE_HIGH_WATERMARK_PERCENT
+}
+
+fn default_resume_low_watermark_percent() -> u8 {
+    DEFAULT_RESUME_LOW_WATERMARK_PERCENT
+}
+
+fn default_shutdown_grace_ms() -> u64 {
+    DEFAULT_SHUTDOWN_GRACE_MS
+}
+
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
+
     use super::*;
 
     #[test]
@@ -170,6 +232,7 @@ mod tests {
                 bootstrap_servers = ["localhost:9092"]
                 group_id = "test"
                 topics = ["signals"]
+                auto_offset_reset = "earliest"
                 offset_store_flush_ms = 100
             "#,
         )
@@ -179,13 +242,14 @@ mod tests {
     }
 
     #[test]
-    fn supplies_v1_defaults() {
+    fn supplies_hardening_defaults() {
         let config = toml::from_str::<AppConfig>(
             r#"
                 [kafka]
                 bootstrap_servers = ["localhost:9092"]
                 group_id = "test"
                 topics = ["signals"]
+                auto_offset_reset = "earliest"
             "#,
         )
         .unwrap();
@@ -193,5 +257,26 @@ mod tests {
         config.validate().unwrap();
         assert_eq!(config.kafka.record_accounting_overhead_bytes, 128);
         assert_eq!(config.kafka.auto_commit_interval_ms, 5_000);
+        assert_eq!(config.kafka.memory_budget_bytes, 64 * 1024 * 1024);
+        assert_eq!(config.kafka.max_payload_bytes, 1024 * 1024);
+        assert_eq!(config.kafka.prefetch_max_kbytes, 16 * 1024);
+        assert_eq!(config.kafka.pause_high_watermark_percent, 80);
+        assert_eq!(config.kafka.resume_low_watermark_percent, 50);
+        assert_eq!(config.kafka.shutdown_grace_ms, 30_000);
+    }
+
+    #[test]
+    fn requires_explicit_offset_reset_policy() {
+        let error = toml::from_str::<AppConfig>(
+            r#"
+                [kafka]
+                bootstrap_servers = ["localhost:9092"]
+                group_id = "test"
+                topics = ["signals"]
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("auto_offset_reset"));
     }
 }

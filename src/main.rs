@@ -1,6 +1,6 @@
 use std::{env, path::PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -21,13 +21,42 @@ async fn main() -> Result<()> {
     let config = AppConfig::from_file(&config_path)?;
 
     let shutdown = CancellationToken::new();
-    let signal = shutdown.clone();
-    tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            info!("shutdown requested");
-            signal.cancel();
-        }
-    });
+    let ingress = flux::run(config, shutdown.clone());
+    tokio::pin!(ingress);
 
-    flux::run(config, shutdown).await
+    tokio::select! {
+        result = &mut ingress => result,
+        signal = wait_for_shutdown_signal() => {
+            signal?;
+            info!("shutdown requested");
+            shutdown.cancel();
+            ingress.await
+        }
+    }
+}
+
+async fn wait_for_shutdown_signal() -> Result<()> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+
+        let mut terminate =
+            signal(SignalKind::terminate()).context("failed to install SIGTERM handler")?;
+
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => {
+                result.context("failed to listen for Ctrl-C")
+            }
+            received = terminate.recv() => {
+                received.context("SIGTERM listener closed unexpectedly")
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c()
+            .await
+            .context("failed to listen for Ctrl-C")
+    }
 }

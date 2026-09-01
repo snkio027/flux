@@ -54,6 +54,9 @@ from the tracker's safe snapshot.
   capacity and byte-budget capacity.
 - `KAFKA-015`: The final synchronous offset set is derived from the
   `OffsetTracker` safe snapshot, never the last received position.
+- `KAFKA-016`: Delivered offsets are strictly increasing within one partition
+  assignment epoch. Numeric gaps are allowed; backward or duplicate delivery
+  fails closed.
 
 ## Rebalance split of responsibility
 
@@ -77,6 +80,12 @@ The memory budget must fit in `u32` because Tokio's multi-permit semaphore API
 uses a `u32` permit count. A single record larger than the configured total
 budget fails closed rather than waiting forever.
 
+v1 uses hysteresis across both application budgets: pause when either the work
+queue or accounted bytes reaches 80%, and resume only when both are at or below
+50%. The librdkafka shared prefetch queue is separately capped at 16 MiB. The
+application rejects payloads above 1 MiB; this application check is authoritative
+because librdkafka can expand its fetch size to retrieve an oversized record.
+
 ## Failure and shutdown policy
 
 v1 deliberately has no retry scheduler. `Completion::Failed` is fatal. Adding a
@@ -84,7 +93,9 @@ retryable flag without a retry state machine would promise behavior that does
 not exist. A future revision can introduce explicit retry, quarantine, and fatal
 dispositions.
 
-Shutdown uses this sequence:
+Shutdown uses this sequence, bounded by `shutdown_grace_ms` (30 seconds by
+default). The service enters this path for both Ctrl-C/SIGINT and Unix SIGTERM;
+failure to install either signal listener is fatal rather than ignored:
 
 ```text
 PAUSE DATA
@@ -95,3 +106,24 @@ PAUSE DATA
 -> COMMIT SNAPSHOT SYNCHRONOUSLY
 -> EXIT
 ```
+
+If the drain deadline expires, the runner stops waiting, commits only ACKs
+already reflected in the safe prefix, aborts the downstream task, and exits
+non-zero. Unfinished work is replayed after restart.
+
+## Fixed consumer contract
+
+The following settings are fixed in code rather than exposed as operator
+tuning:
+
+```text
+enable.auto.offset.store=false
+enable.auto.commit=true
+group.protocol=classic
+partition.assignment.strategy=cooperative-sticky
+allow.auto.create.topics=false
+isolation.level=read_committed
+```
+
+`auto_offset_reset` remains configurable but is mandatory, preventing a new
+consumer group from silently choosing whether to skip existing backlog.

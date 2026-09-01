@@ -3,7 +3,8 @@ bootstrap_servers = ["localhost:9092"]
 group_id = "vehicle-signal-processor"
 topics = ["vehicle-signals"]
 client_id = "vehicle-signal-processor"
-auto_offset_reset = "latest"
+# Required policy: choose earliest, latest, or error deliberately.
+auto_offset_reset = "earliest"
 
 # Broker commits remain automatic. The application updates librdkafka's local
 # offset store immediately whenever the safe completion prefix advances.
@@ -12,7 +13,17 @@ session_timeout_ms = 45000
 max_poll_interval_ms = 300000
 
 # A record must own capacity from both budgets before it enters the work queue.
-work_queue_capacity = 1024
-completion_queue_capacity = 1024
-memory_budget_bytes = 268435456
+work_queue_capacity = 2048
+completion_queue_capacity = 2048
+memory_budget_bytes = 67108864
 record_accounting_overhead_bytes = 128
+max_payload_bytes = 1048576
+prefetch_max_kbytes = 16384
+
+# Pause when either application budget reaches 80%; resume only after both
+# budgets fall to 50% or lower.
+pause_high_watermark_percent = 80
+resume_low_watermark_percent = 50
+
+# On expiry, commit only the ACKed safe prefix and exit non-zero.
+shutdown_grace_ms = 30000
