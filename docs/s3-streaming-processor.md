@@ -24,8 +24,11 @@ The `[s3]` section controls:
 | `stream_idle_timeout_ms` | Maximum wait for the next body chunk |
 
 The operation timeout ends when `GetObject` returns its response and therefore
-does not protect the subsequent `ByteStream`. The explicit stream-idle timeout
-closes that gap.
+does not protect the subsequent `ByteStream`. Flux explicitly disables the SDK
+stalled-stream watchdog and makes `stream_idle_timeout_ms` the single source of
+truth for that phase. This timeout measures only the wait for the next nonempty
+body chunk; time spent in downstream chunk processing does not consume its
+budget.
 
 SDK retries cover failures before a usable `GetObject` response is returned.
 Once body chunks have reached the consumer, the downloader never retries the

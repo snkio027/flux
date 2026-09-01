@@ -1,7 +1,10 @@
 use std::{future::Future, time::Duration};
 
 use anyhow::{Context, Result, anyhow, bail};
-use aws_config::{BehaviorVersion, retry::RetryConfig, timeout::TimeoutConfig};
+use aws_config::{
+    BehaviorVersion, ConfigLoader, retry::RetryConfig,
+    stalled_stream_protection::StalledStreamProtectionConfig, timeout::TimeoutConfig,
+};
 use aws_sdk_s3::{
     Client,
     config::{Builder as S3ClientConfigBuilder, Region},
@@ -38,6 +41,10 @@ pub struct S3Downloader {
     stream_idle_timeout: Duration,
 }
 
+fn with_flux_stream_idle_policy(loader: ConfigLoader) -> ConfigLoader {
+    loader.stalled_stream_protection(StalledStreamProtectionConfig::disabled())
+}
+
 impl S3Downloader {
     /// Builds an S3 client from the AWS default credential/provider chain plus
     /// the explicit service settings in `S3Config`.
@@ -54,9 +61,11 @@ impl S3Downloader {
             .operation_timeout(Duration::from_millis(config.operation_timeout_ms))
             .build();
         let retry_config = RetryConfig::standard().with_max_attempts(config.max_attempts);
-        let mut shared_config = aws_config::defaults(BehaviorVersion::latest())
-            .timeout_config(timeout_config)
-            .retry_config(retry_config);
+        let mut shared_config = with_flux_stream_idle_policy(
+            aws_config::defaults(BehaviorVersion::latest())
+                .timeout_config(timeout_config)
+                .retry_config(retry_config),
+        );
         if let Some(region) = &config.region {
             shared_config = shared_config.region(Region::new(region.clone()));
         }
@@ -180,7 +189,6 @@ where
         if chunk.is_empty() {
             continue;
         }
-        progress_deadline = Instant::now() + stream_idle_timeout;
         let chunk_size = u64::try_from(chunk.len()).context("S3 chunk length exceeds u64")?;
         let next_size = streamed_size
             .checked_add(chunk_size)
@@ -194,6 +202,7 @@ where
             .await
             .context("object chunk consumer failed")?;
         streamed_size = next_size;
+        progress_deadline = Instant::now() + stream_idle_timeout;
     }
 
     if streamed_size != expected_size {
@@ -206,12 +215,13 @@ where
 mod tests {
     #![allow(clippy::unwrap_used)]
 
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
     use std::{
+        collections::VecDeque,
         pin::Pin,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
         task::{Context as TaskContext, Poll},
     };
 
@@ -237,6 +247,48 @@ mod tests {
         ) -> Poll<Option<std::result::Result<Frame<Self::Data>, Self::Error>>> {
             Poll::Pending
         }
+    }
+
+    #[derive(Debug)]
+    struct ReadyChunks {
+        chunks: VecDeque<Bytes>,
+        yield_before_next: bool,
+    }
+
+    impl Body for ReadyChunks {
+        type Data = Bytes;
+        type Error = std::io::Error;
+
+        fn poll_frame(
+            mut self: Pin<&mut Self>,
+            context: &mut TaskContext<'_>,
+        ) -> Poll<Option<std::result::Result<Frame<Self::Data>, Self::Error>>> {
+            if self.yield_before_next {
+                self.yield_before_next = false;
+                context.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+
+            let chunk = self.chunks.pop_front();
+            self.yield_before_next = chunk.is_some() && !self.chunks.is_empty();
+            Poll::Ready(chunk.map(|chunk| Ok(Frame::data(chunk))))
+        }
+    }
+
+    #[tokio::test]
+    async fn aws_sdk_stalled_stream_protection_is_disabled() {
+        let shared_config = with_flux_stream_idle_policy(
+            aws_config::defaults(BehaviorVersion::latest())
+                .region(Region::new("us-east-1"))
+                .no_credentials(),
+        )
+        .load()
+        .await;
+        let client_config = Config::from(&shared_config);
+        let protection = client_config.stalled_stream_protection().unwrap();
+
+        assert!(!protection.is_enabled());
+        assert!(!protection.download_enabled());
     }
 
     #[tokio::test]
@@ -349,6 +401,33 @@ mod tests {
         .unwrap();
 
         assert_eq!(&*collected.lock().await, b"abcdef");
+    }
+
+    #[tokio::test]
+    async fn slow_consumer_does_not_consume_the_stream_idle_budget() {
+        let body = ByteStream::from_body_1_x(ReadyChunks {
+            chunks: VecDeque::from([Bytes::from_static(b"a"), Bytes::from_static(b"b")]),
+            yield_before_next: false,
+        });
+        let calls = Arc::new(AtomicUsize::new(0));
+        let consumer = {
+            let calls = Arc::clone(&calls);
+            move |_chunk: Bytes| {
+                let calls = Arc::clone(&calls);
+                async move {
+                    if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        tokio::time::sleep(Duration::from_millis(30)).await;
+                    }
+                    Ok(())
+                }
+            }
+        };
+
+        consume_body(body, 2, Duration::from_millis(10), consumer)
+            .await
+            .unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
