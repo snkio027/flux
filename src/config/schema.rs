@@ -42,8 +42,10 @@ impl From<RawAppConfig> for AppConfig {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawKafkaConfig {
+    #[serde(deserialize_with = "deserialize_string_list")]
     bootstrap_servers: Vec<String>,
     group_id: String,
+    #[serde(deserialize_with = "deserialize_string_list")]
     topics: Vec<String>,
     #[serde(default = "default_client_id")]
     client_id: String,
@@ -56,6 +58,28 @@ struct RawKafkaConfig {
     max_poll_interval_ms: u64,
     #[serde(default = "default_prefetch_max_kbytes")]
     prefetch_max_kbytes: u32,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StringListRepresentation {
+    Delimited(String),
+    Sequence(Vec<String>),
+}
+
+fn deserialize_string_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let representation = StringListRepresentation::deserialize(deserializer)?;
+    Ok(match representation {
+        StringListRepresentation::Delimited(value) => value
+            .split(',')
+            .map(str::trim)
+            .map(ToOwned::to_owned)
+            .collect(),
+        StringListRepresentation::Sequence(values) => values,
+    })
 }
 
 impl From<RawKafkaConfig> for KafkaConfig {

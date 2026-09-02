@@ -51,8 +51,10 @@ FLUX__SHUTDOWN__GRACE_MS
 ```
 
 `kafka.bootstrap_servers` and `kafka.topics` accept comma-separated values.
-Other strings are not split. Boolean, integer, and enum values are parsed into
-their schema types; invalid values fail startup.
+Elements are trimmed, and empty elements fail validation. Their lexical form is
+preserved, so singleton names such as `001`, `123`, and `true` remain strings.
+Other strings are not split. Boolean, integer, and enum values are converted
+only when their schema fields require those types; invalid values fail startup.
 
 The minimum env-only configuration is:
 

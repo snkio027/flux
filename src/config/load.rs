@@ -83,11 +83,7 @@ fn source_error_context(file_path: Option<&Path>) -> String {
 fn flux_environment(source: Option<Map<String, String>>) -> Environment {
     let environment = Environment::with_prefix("FLUX")
         .prefix_separator("__")
-        .separator("__")
-        .try_parsing(true)
-        .list_separator(",")
-        .with_list_parse_key("kafka.bootstrap_servers")
-        .with_list_parse_key("kafka.topics");
+        .separator("__");
     match source {
         Some(source) => environment.source(Some(source)),
         None => environment,
@@ -194,6 +190,8 @@ mod tests {
             "http://minio:9000".to_owned(),
         );
         source.insert("FLUX__KAFKA__GROUP_ID".to_owned(), "env,group".to_owned());
+        source.insert("FLUX__S3__FORCE_PATH_STYLE".to_owned(), "true".to_owned());
+        source.insert("FLUX__S3__MAX_ATTEMPTS".to_owned(), "4".to_owned());
         let config = load_test(None, source).unwrap();
 
         assert_eq!(
@@ -203,6 +201,8 @@ mod tests {
         assert_eq!(config.kafka.topics, ["signals-a", "signals-b"]);
         assert_eq!(config.kafka.group_id, "env,group");
         assert_eq!(config.s3.endpoint_url.as_deref(), Some("http://minio:9000"));
+        assert!(config.s3.force_path_style);
+        assert_eq!(config.s3.max_attempts, 4);
         assert_eq!(config.ingress.work_queue_capacity, 2_048);
     }
 
@@ -259,6 +259,35 @@ mod tests {
         );
         assert_eq!(config.kafka.topics, ["topic-a", "topic-b"]);
         assert_eq!(config.kafka.group_id, "file-group");
+    }
+
+    #[test]
+    fn environment_lists_preserve_singleton_lexical_identity_and_trim_elements() {
+        let file = TestConfigFile::new(MINIMAL_TOML);
+        for (raw, expected) in [
+            ("123", vec!["123"]),
+            ("001", vec!["001"]),
+            ("true", vec!["true"]),
+            ("topic-a, topic-b", vec!["topic-a", "topic-b"]),
+        ] {
+            let source = [("FLUX__KAFKA__TOPICS".to_owned(), raw.to_owned())]
+                .into_iter()
+                .collect();
+
+            let config = load_test(Some(file.path()), source).unwrap();
+
+            assert_eq!(config.kafka.topics, expected, "{raw}");
+        }
+
+        let source = [(
+            "FLUX__KAFKA__TOPICS".to_owned(),
+            "topic-a,,topic-b".to_owned(),
+        )]
+        .into_iter()
+        .collect();
+        let error = load_test(Some(file.path()), source).unwrap_err();
+
+        assert!(error.to_string().contains("non-empty topic"), "{error:#}");
     }
 
     #[test]
