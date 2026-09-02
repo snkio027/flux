@@ -14,6 +14,11 @@ const DEFAULT_MAX_PAYLOAD_BYTES: usize = 1024 * 1024;
 const DEFAULT_OBJECT_QUEUE_CAPACITY: usize = 256;
 const DEFAULT_OBJECT_WORKER_COUNT: usize = 8;
 const DEFAULT_MAX_OBJECT_SIZE: u64 = 1024 * 1024 * 1024;
+const DEFAULT_S3_MAX_ATTEMPTS: u32 = 3;
+const DEFAULT_S3_CONNECT_TIMEOUT_MS: u64 = 3_000;
+const DEFAULT_S3_OPERATION_ATTEMPT_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_S3_OPERATION_TIMEOUT_MS: u64 = 120_000;
+const DEFAULT_S3_STREAM_IDLE_TIMEOUT_MS: u64 = 20_000;
 const DEFAULT_PREFETCH_MAX_KBYTES: u32 = 16 * 1024;
 const DEFAULT_PAUSE_HIGH_WATERMARK_PERCENT: u8 = 80;
 const DEFAULT_RESUME_LOW_WATERMARK_PERCENT: u8 = 50;
@@ -25,6 +30,7 @@ pub struct AppConfig {
     pub kafka: KafkaConfig,
     pub ingress: IngressConfig,
     pub object_processing: ObjectProcessingConfig,
+    pub s3: S3Config,
     pub shutdown: ShutdownConfig,
 }
 
@@ -53,6 +59,7 @@ impl AppConfig {
         self.kafka.validate()?;
         self.ingress.validate()?;
         self.object_processing.validate()?;
+        self.s3.validate()?;
         self.shutdown.validate()
     }
 }
@@ -193,6 +200,74 @@ impl ObjectProcessingConfig {
     }
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct S3Config {
+    /// Explicit region override. When absent, the AWS default provider chain is used.
+    pub region: Option<String>,
+    /// Optional endpoint override for S3-compatible services and local tests.
+    pub endpoint_url: Option<String>,
+    pub force_path_style: bool,
+    /// Maximum attempts including the initial request.
+    pub max_attempts: u32,
+    pub connect_timeout_ms: u64,
+    pub operation_attempt_timeout_ms: u64,
+    pub operation_timeout_ms: u64,
+    /// Maximum idle wait between chunks after `GetObject` returns its response.
+    pub stream_idle_timeout_ms: u64,
+}
+
+impl Default for S3Config {
+    fn default() -> Self {
+        Self {
+            region: None,
+            endpoint_url: None,
+            force_path_style: false,
+            max_attempts: DEFAULT_S3_MAX_ATTEMPTS,
+            connect_timeout_ms: DEFAULT_S3_CONNECT_TIMEOUT_MS,
+            operation_attempt_timeout_ms: DEFAULT_S3_OPERATION_ATTEMPT_TIMEOUT_MS,
+            operation_timeout_ms: DEFAULT_S3_OPERATION_TIMEOUT_MS,
+            stream_idle_timeout_ms: DEFAULT_S3_STREAM_IDLE_TIMEOUT_MS,
+        }
+    }
+}
+
+impl S3Config {
+    pub(crate) fn validate(&self) -> Result<()> {
+        if self
+            .region
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            bail!("s3.region must not be empty when present");
+        }
+        if self
+            .endpoint_url
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            bail!("s3.endpoint_url must not be empty when present");
+        }
+        if !(1..=10).contains(&self.max_attempts) {
+            bail!("s3.max_attempts must be between 1 and 10");
+        }
+        if self.connect_timeout_ms == 0
+            || self.operation_attempt_timeout_ms == 0
+            || self.operation_timeout_ms == 0
+            || self.stream_idle_timeout_ms == 0
+        {
+            bail!("all S3 timeout values must be greater than zero");
+        }
+        if self.connect_timeout_ms > self.operation_attempt_timeout_ms {
+            bail!("s3.connect_timeout_ms must not exceed operation_attempt_timeout_ms");
+        }
+        if self.operation_attempt_timeout_ms > self.operation_timeout_ms {
+            bail!("s3.operation_attempt_timeout_ms must not exceed operation_timeout_ms");
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct BackpressureConfig {
@@ -273,6 +348,8 @@ struct SerializedAppConfig {
     #[serde(default)]
     object_processing: Option<ObjectProcessingConfig>,
     #[serde(default)]
+    s3: Option<S3Config>,
+    #[serde(default)]
     shutdown: Option<ShutdownConfig>,
 }
 
@@ -295,6 +372,7 @@ impl SerializedAppConfig {
             kafka,
             ingress: self.ingress.or(legacy_ingress).unwrap_or_default(),
             object_processing: self.object_processing.unwrap_or_default(),
+            s3: self.s3.unwrap_or_default(),
             shutdown: self.shutdown.or(legacy_shutdown).unwrap_or_default(),
         })
     }
@@ -452,6 +530,8 @@ mod tests {
         assert_eq!(config.object_processing.queue_capacity, 256);
         assert_eq!(config.object_processing.worker_count, 8);
         assert_eq!(config.object_processing.max_object_size, 1024 * 1024 * 1024);
+        assert_eq!(config.s3.max_attempts, 3);
+        assert_eq!(config.s3.stream_idle_timeout_ms, 20_000);
         assert_eq!(config.shutdown.grace_ms, 30_000);
     }
 
@@ -538,6 +618,7 @@ mod tests {
         config.validate().unwrap();
         assert_eq!(config.ingress.work_queue_capacity, 2_048);
         assert_eq!(config.object_processing.worker_count, 8);
+        assert_eq!(config.s3.region.as_deref(), Some("us-east-1"));
         assert_eq!(config.shutdown.grace_ms, 30_000);
     }
 
@@ -559,5 +640,26 @@ mod tests {
         let error = config.validate().unwrap_err();
 
         assert!(error.to_string().contains("worker_count"));
+    }
+
+    #[test]
+    fn rejects_incoherent_s3_timeouts() {
+        let config = toml::from_str::<AppConfig>(
+            r#"
+                [kafka]
+                bootstrap_servers = ["localhost:9092"]
+                group_id = "test"
+                topics = ["signals"]
+                auto_offset_reset = "earliest"
+
+                [s3]
+                connect_timeout_ms = 5000
+                operation_attempt_timeout_ms = 1000
+            "#,
+        )
+        .unwrap();
+        let error = config.validate().unwrap_err();
+
+        assert!(error.to_string().contains("connect_timeout_ms"));
     }
 }

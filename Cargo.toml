@@ -15,6 +15,9 @@ unwrap_used = "deny"
 
 [dependencies]
 anyhow = "1"
+aws-config = { version = "=1.11.0", features = ["behavior-version-latest"] }
+aws-sdk-s3 = { version = "=1.144.0", features = ["behavior-version-latest"] }
+bytes = "1"
 flume = "0.11"
 rdkafka = { version = "0.39", features = ["cmake-build"] }
 serde = { version = "1", features = ["derive"] }
@@ -27,4 +30,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 [dev-dependencies]
+aws-sdk-s3 = { version = "=1.144.0", features = ["test-util"] }
+aws-smithy-http-client = { version = "=1.4.0", features = ["test-util"] }
+aws-smithy-types = "=1.6.2"
+http = "1"
+http-body = "1"
 testcontainers-modules = { version = "0.15", features = ["kafka"] }
