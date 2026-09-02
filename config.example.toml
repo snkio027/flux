@@ -1,3 +1,5 @@
+# This file is optional. Any canonical field can be overridden with a matching
+# FLUX__SECTION__FIELD environment variable; environment values take priority.
 [kafka]
 bootstrap_servers = ["localhost:9092"]
 group_id = "vehicle-signal-processor"

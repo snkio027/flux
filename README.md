@@ -11,7 +11,13 @@ then run:
 cargo run -- config.toml
 ```
 
-`FLUX_CONFIG` can provide the config path when no command-line path is passed.
+The file is optional: container deployments can supply the complete canonical
+schema through `FLUX__...` environment variables. Values are resolved once at
+startup in this order: compiled defaults, optional TOML file, environment
+overrides. A CLI path takes precedence over `FLUX_CONFIG`; explicitly selected
+files must exist, while the default `./config.toml` may be absent. See
+[`docs/configuration-v2.md`](docs/configuration-v2.md) for the complete contract.
+
 Set `RUST_LOG` to adjust logging. The current downstream implementation is a
 `DiscardSink` used to prove the ingress contract; replace it with the real
 processor through `run_with_sink`. Downstream code consumes each
