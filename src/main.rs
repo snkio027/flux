@@ -13,12 +13,8 @@ async fn main() -> Result<()> {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
 
-    let config_path = env::args_os()
-        .nth(1)
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("FLUX_CONFIG").map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("config.toml"));
-    let config = AppConfig::from_file(&config_path)?;
+    let cli_config_path = env::args_os().nth(1).map(PathBuf::from);
+    let config = AppConfig::load(cli_config_path)?;
 
     let shutdown = CancellationToken::new();
     let ingress = flux::run(config, shutdown.clone());
